@@ -151,7 +151,7 @@ dialog::backdrop{background:#153e3466}
 <div id="content" class="page" tabindex="-1"></div>
 </main>
 <div id="toast" class="toast" role="status" hidden></div>
-<dialog id="pause"><h2>Your session is still here</h2><p class="muted" style="margin:14px 0 20px">You can pause and resume while this page stays open. This mockup does not save after a refresh or send any data.</p><button class="primary" onclick="document.getElementById('pause').close()">Resume audit →</button></dialog>
+<dialog id="pause"><h2>Your session is still here</h2><p class="muted" style="margin:14px 0 14px">Your audit is kept for 30 days after you last use it. <span class="pill prov">Provisional</span> To come back, we'll email you a link. <span class="pill prov">Provisional</span> In this mockup nothing is saved or sent.</p><div class="field"><label for="pauseEmail">Email address</label><input id="pauseEmail" type="email" placeholder="you@company.com"></div><div class="row" style="margin-top:14px"><button onclick="sendLink()">Send me a link</button><button class="primary" onclick="document.getElementById('pause').close()">Resume audit →</button></div></dialog>
 <script>
 /* ---------------------------------------------------------------
    AI & Automation Audit — interactive mockup
@@ -159,8 +159,9 @@ dialog::backdrop{background:#153e3466}
    is still to be confirmed with Alex. Keep the logic in one place:
    all ROI maths lives in roi() below and nowhere else.
 ----------------------------------------------------------------*/
-const STANDARD_WEEK = 40;          // provisional: 40-hour standard week
+const STANDARD_WEEK = 40;          // 40-hour standard week, confirmed by Alex
 const SPRINT_COST   = 5000;        // USD per sprint
+const SPRINT_WEEKS  = 2;           // a sprint is two weeks (build time = sprints × 2)
 const WEEKS_PER_YEAR_BASIS = null; // not used: annual costs come from salary, not hourly rates
 
 const steps=['Business context','Team & roles','Strategic goals','Focus areas','Process shortlist','Process details','AI benchmarking','Results'];
@@ -206,7 +207,8 @@ let processes=[
   satisfaction:i===2?1:i===3?3:2,value:i===0?5:i<3?4:3,
   revenue:i===0?'Indirect':'No',volume:i===0?'600':'',
   pain:i===0?'Re-keying, typos, slow confirmations':'',
-  links:i===3?[2]:i===4?[3]:[0,1]
+  links:i===0?[0,1,3]:i===1?[0,3]:i===3?[2]:i===4?[3]:[0,1],
+  hirePlanned:i===1                      // B2 provisional: demo hire for order-status is pre-confirmed
 }));
 
 const business={name:'Example distributor',website:'',industry:'Industrial distribution',size:'120',locations:'3 warehouses',context:''};
@@ -264,7 +266,10 @@ function roi(p,sc=scenario){
   /* --- cash savings ---------------------------------------------- */
   // Only what the user entered, and only for the two cash-bearing uses.
   const timeUseAnswered=p.timeUse!=='';
+  // PROVISIONAL (B2): "Avoid hiring" only counts as cash if the hire was planned or budgeted.
+  const cashNotCounted=p.timeUse==='nohire'&&!p.hirePlanned;
   const cashEntered=!timeUseAnswered ? null
+    : cashNotCounted ? 0
     : usesCash(p.timeUse) ? (p.cash===''?null:+p.cash)
     : 0;
   // PROVISIONAL: the entered figure is the Expected-scenario saving. Other
@@ -302,7 +307,7 @@ function roi(p,sc=scenario){
     perPersonHours,teamHours,weekShare,
     cost,rate,hoursSaved,capacityValue,
     setup,setupDefault,setupIsDefault:p.setup==='',running,runParts:p.run,
-    timeUseAnswered,cashSavings,cashEntered,expectedRate,
+    timeUseAnswered,cashSavings,cashEntered,expectedRate,cashNotCounted,
     financialROI,financialPayback,capacityReturn,capacityPayback,
     financialRemaining:remaining(cashSavings),
     capacityRemaining:remaining(capacityValue),
@@ -310,16 +315,54 @@ function roi(p,sc=scenario){
   };
 }
 
+/* =================================================================
+   PRIORITY SCORE (PROVISIONAL)
+   Pure: takes a process and scenario, returns every component.
+   Five components, each scaled 0 to 100, combined as a weighted
+   average. Weights default to 20% each and are normalised if edited.
+   ================================================================= */
+const PRIORITY_DEFAULT=[20,20,20,20,20];
+const PRIORITY_LABELS=['Financial return','Capacity-based return','Goal support','Perceived value','Satisfaction gap'];
+let priorityWeights=PRIORITY_DEFAULT.slice(),weightsOpen=false;
+/* scale(r) = clamp((r + 100) / 400 × 100, 0, 100): −100% scores 0, +300% scores 100 */
+const scaleROI=r=>Math.min(100,Math.max(0,(r+100)/400*100));
+function priority(p,sc=scenario){
+  const c=roi(p,sc);
+  /* goal support: a goal at rank r among N goals has weight N − r + 1 */
+  const N=goals.length,rankW=i=>N-i;
+  const goalTotal=goals.reduce((t,_,i)=>t+rankW(i),0);
+  const goalGot=[...new Set(p.links)].filter(i=>i>=0&&i<N).reduce((t,i)=>t+rankW(i),0);
+  const finRaw=c.financialROI.state==='ok'?c.financialROI.value:null;
+  const capRaw=c.capacityReturn.state==='ok'?c.capacityReturn.value:null;
+  const valRaw=+p.value>=1?+p.value:null, satRaw=+p.satisfaction>=1?+p.satisfaction:null;
+  const comps=[
+    {key:'fin',  raw:finRaw,                scaled:finRaw==null?0:scaleROI(finRaw), assumedZero:finRaw==null},
+    {key:'cap',  raw:capRaw,                scaled:capRaw==null?null:scaleROI(capRaw)},
+    {key:'goals',raw:goalTotal?goalGot/goalTotal*100:0, scaled:goalTotal?goalGot/goalTotal*100:0, goalGot,goalTotal},
+    {key:'value',raw:valRaw,                scaled:valRaw==null?null:(valRaw-1)/4*100},
+    {key:'sat',  raw:satRaw,                scaled:satRaw==null?null:(5-satRaw)/4*100}
+  ];
+  const w=priorityWeights.map(x=>Math.max(0,+x||0)),wsum=w.reduce((a,b)=>a+b,0);
+  const weights=w.map(x=>wsum?x/wsum:1/w.length);
+  comps.forEach((k,i)=>{k.label=PRIORITY_LABELS[i];k.weight=weights[i];k.contribution=k.scaled==null?null:k.scaled*weights[i]});
+  const needsInput=comps.filter(k=>k.scaled==null).map(k=>k.label);
+  return {components:comps,needsInput,score:needsInput.length?null:comps.reduce((t,k)=>t+k.contribution,0),scenarioName:SCENARIOS[sc]};
+}
+
 /* Display helpers for the two return/payback shapes above. */
 const showRet=r=>r.state==='ok'?pct(r.value):r.state==='na'?'Not applicable':'Needs input';
 const showPay=r=>r.state==='ok'?(r.value===0?'Immediate':num(r.value,1)+' months'):r.state==='notreached'?'Not reached':'Needs input';
 const PAYBACK_NOTE='Payback counts from the day the tool is in use; build time is not included';
+const paybackNote=w=>`Payback counts from the day the tool is in use; build time (about ${w} weeks) is not included.`;
 /* Plain-English line showing how the scenario cash saving was reached. */
-const cashLine=c=>c.cashEntered==null?'':c.cashEntered===0?'':c.expectedRate===0
+const NOT_PLANNED_NOTE='Not counted as cash: the hire was not planned';
+const cashLine=c=>c.cashNotCounted?`<code>${NOT_PLANNED_NOTE}, so the cash saving is 0</code>`:c.cashEntered==null?'':c.cashEntered===0?'':c.expectedRate===0
   ?`<code>cash saving, ${c.scenarioName} = ${money(c.cashEntered)} (Expected time reduction is 0%, so the entered figure is held constant)</code>`
   :`<code>cash saving, ${c.scenarioName} = entered saving × (${c.scenarioName} reduction ÷ Expected reduction) = ${money(c.cashEntered)} × (${c.rate}% ÷ ${c.expectedRate}%) = ${money(c.cashSavings)}</code>`;
 /* ---------- shell ---------------------------------------------- */
 function toast(s){const el=document.getElementById('toast');el.textContent=s;el.hidden=false;clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>el.hidden=true,4000)}
+/* Mockup only: nothing is sent. The dialog sits in the top layer, so close it to let the toast show. */
+function sendLink(){document.getElementById('pause').close();toast('In the live tool we would email you a link. Nothing is sent in this mockup.')}
 function pauseAudit(){document.getElementById('pause').showModal()}
 function go(n){step=n;visited.add(Math.min(n,7));render();document.getElementById('content').focus({preventScroll:true});window.scrollTo({top:0,behavior:'smooth'})}
 
@@ -381,7 +424,7 @@ function addProcess(){
   if(!name)return toast('Enter a process name.');
   if(!selectedAreas.size)return toast('Choose a focus area first.');
   if(chosen().length>=10)return toast('You can select up to ten processes.');
-  processes.push({id:Date.now(),name,area,role:roles[0]?.id,people:1,timeMode:'hours',hours:'',tasks:'',minutes:'',rates:[15,30,45],sprints:2,setup:'',run:[1200,800,1000],runTouched:false,timeUse:'',cash:'',impact:'To be confirmed',solution:'Illustrative automation opportunity. Define the solution with your team.',selected:true,satisfaction:3,value:3,revenue:'No',volume:'',pain:'',links:[]});
+  processes.push({id:Date.now(),name,area,role:roles[0]?.id,people:1,timeMode:'hours',hours:'',tasks:'',minutes:'',rates:[15,30,45],sprints:2,setup:'',run:[1200,800,1000],runTouched:false,timeUse:'',cash:'',impact:'To be confirmed',solution:'Illustrative automation opportunity. Define the solution with your team.',selected:true,satisfaction:3,value:3,revenue:'No',volume:'',pain:'',links:[],hirePlanned:false});
   render()
 }
 /* ---------- step 6: process details ---------------------------- */
@@ -397,7 +440,7 @@ function timeInputs(p){
     inputs=`<div class="grid two"><div class="field"><label for="tasks">Tasks per week <small>· whole team</small></label><input id="tasks" type="number" min="0" value="${p.tasks}" placeholder="Unknown" onchange="updateProcess(${p.id},'tasks',this.value===''?'':Math.max(0,+this.value))"></div><div class="field"><label for="minutes">Minutes per task</label><input id="minutes" type="number" min="0" value="${p.minutes}" placeholder="Unknown" onchange="updateProcess(${p.id},'minutes',this.value===''?'':Math.max(0,+this.value))"></div></div>`;
   }
   const readout=unknown?`<div class="readout"><strong>Needs input</strong><div class="small muted">Choose how you’d like to describe the time spent.</div></div>`
-   :`<div class="readout"><div><strong>Per person:</strong> ${c.perPersonHours==null?'Needs input':num(c.perPersonHours,1)+' hours a week'}</div><div><strong>Whole team:</strong> ${c.teamHours==null?'Needs input':num(c.teamHours,1)+' hours a week'} ${c.people==null?'':`(${c.people} ${c.people===1?'person':'people'})`}</div><div class="small muted">This is ${c.weekShare==null?'—':num(c.weekShare,0)+'%'} of a ${STANDARD_WEEK}-hour week. <span class="pill prov">Provisional</span></div></div>`;
+   :`<div class="readout"><div><strong>Per person:</strong> ${c.perPersonHours==null?'Needs input':num(c.perPersonHours,1)+' hours a week'}</div><div><strong>Whole team:</strong> ${c.teamHours==null?'Needs input':num(c.teamHours,1)+' hours a week'} ${c.people==null?'':`(${c.people} ${c.people===1?'person':'people'})`}</div><div class="small muted">This is ${c.weekShare==null?'—':num(c.weekShare,0)+'%'} of a ${STANDARD_WEEK}-hour week.</div></div>`;
   return `<div class="field"><label id="timemodelabel">How is the time spent measured?</label><div class="seg" role="radiogroup" aria-labelledby="timemodelabel">${modeBtn('hours','Hours per person per week')}${modeBtn('tasks','Tasks per week × minutes per task')}</div><div style="margin-top:6px"><button class="textbtn small" onclick="setTimeMode(${p.id},'')">I don’t know</button></div></div>${inputs}${readout}`;
 }
 function setTimeMode(id,m){const p=byId(id);p.timeMode=m;render()}
@@ -464,7 +507,7 @@ const RUN_LABELS=['Software','AI usage','Support'];
 /* Setup cost control: defaults to sprints × 5,000, editable, resettable, 0 allowed. */
 function setupControl(p,ns){
   const c=roi(p);
-  return `<div class="field"><label for="${ns}setup">Setup cost · USD <small>· default ${p.sprints} sprints × ${money(SPRINT_COST)}</small></label><div class="row"><input id="${ns}setup" class="salary" type="number" min="0" value="${p.setup===''?c.setupDefault:p.setup}" aria-describedby="${ns}setuphint" onchange="setSetup(${p.id},this.value)">${p.setup===''?'<span class="pill">Default</span>':`<button class="textbtn small" onclick="setSetup(${p.id},'')">Reset to default</button>`}</div><div id="${ns}setuphint" class="small muted" style="margin-top:5px">Zero is allowed. A setup cost of zero shows the return as “Not applicable” and payback as “Immediate” where the benefit exceeds running costs.</div></div>`;
+  return `<div class="field"><label for="${ns}setup">Setup cost · USD <small>· default ${p.sprints} sprints × ${money(SPRINT_COST)}</small></label><div class="row"><input id="${ns}setup" class="salary" type="number" min="0" value="${p.setup===''?c.setupDefault:p.setup}" aria-describedby="${ns}setuphint" onchange="setSetup(${p.id},this.value)">${p.setup===''?'<span class="pill">Default</span>':`<button class="textbtn small" onclick="setSetup(${p.id},'')">Reset to default</button>`}</div><div id="${ns}setuphint" class="small muted" style="margin-top:5px">Zero is allowed. A setup cost of zero shows the return as “Not applicable” and payback as “Immediate” where the benefit exceeds running costs.</div><div class="small muted" style="margin-top:3px">Build time about ${p.sprints*SPRINT_WEEKS} weeks (a sprint is two weeks)</div></div>`;
 }
 function setSetup(id,v){const p=byId(id);p.setup=v===''?'':Math.max(0,+v||0);render()}
 
@@ -480,10 +523,11 @@ function timeUseControl(p,ns){
   const c=roi(p);
   const cash=usesCash(p.timeUse);
   return `<fieldset style="border:0;padding:0;margin:0"><legend style="font-size:13px;font-weight:600;margin-bottom:6px">How will the saved time be used? <span class="pill prov">Provisional</span></legend><div class="radiorow">${TIME_USES.map(u=>`<label><input type="radio" name="${ns}use" value="${u.k}" ${p.timeUse===u.k?'checked':''} onchange="setTimeUse(${p.id},'${u.k}')">${u.label}</label>`).join('')}</div>${p.timeUse===''?`<p class="small muted">Not answered yet. Financial year-one ROI shows “Needs input” until this is answered.</p>`
-  :cash?`<div class="field" style="margin:10px 0 0"><label for="${ns}cash">Annual cash saving, Expected scenario (USD) <span class="pill prov">Provisional</span></label><input id="${ns}cash" class="salary" type="number" min="0" value="${p.cash}" placeholder="Needs input" aria-describedby="${ns}cashhint" onchange="setCash(${p.id},this.value)"><div id="${ns}cashhint" class="small muted" style="margin-top:5px">Other scenarios scale this by time reduction ÷ Expected time reduction.</div></div>`
+  :cash?`<div class="field" style="margin:10px 0 0"><label for="${ns}cash">${p.timeUse==='nohire'?'Annual avoided cost, Expected scenario (USD)':'Annual cash saving, Expected scenario (USD)'} <span class="pill prov">Provisional</span></label><input id="${ns}cash" class="salary" type="number" min="0" value="${p.cash}" placeholder="Needs input" aria-describedby="${ns}cashhint" onchange="setCash(${p.id},this.value)"><div id="${ns}cashhint" class="small muted" style="margin-top:5px">Other scenarios scale this by time reduction ÷ Expected time reduction.</div>${p.timeUse==='nohire'?`<label class="row small" style="margin-top:12px"><input type="checkbox" ${p.hirePlanned?'checked':''} onchange="setHire(${p.id},this.checked)">This hire was planned or budgeted <span class="pill prov">Provisional</span></label>${p.hirePlanned?'':`<p class="small" style="color:#8a4a24;margin-top:6px">${NOT_PLANNED_NOTE}.</p>`}`:''}</div>`
   :`<p class="small muted" style="margin-top:10px">Capacity value only, no cash saving entered.</p>`}</fieldset>`;
 }
 function setTimeUse(id,k){const p=byId(id);p.timeUse=k;if(!usesCash(k))p.cash='';render()}
+function setHire(id,on){byId(id).hirePlanned=on;render()}
 function setCash(id,v){const p=byId(id);p.cash=v===''?'':Math.max(0,+v||0);render()}
 
 /* Four kinds of value, shown separately and never added together. */
@@ -492,7 +536,7 @@ function fourValues(p){
   return `<div><div class="row between" style="margin-bottom:10px"><h3>Four kinds of value</h3><span class="small muted">Shown separately · never added together</span></div><div class="grid two" style="gap:12px">
 <div class="valueblock"><span class="eyebrow">Time released</span><strong>${c.hoursSaved==null?'Needs input':num(c.hoursSaved,1)+' hours a week'}</strong><p class="small muted" style="margin-top:4px">Team hours freed in the ${c.scenarioName} scenario.</p></div>
 <div class="valueblock"><span class="eyebrow">Capacity value</span><strong>${money(c.capacityValue)}</strong><p class="small muted" style="margin-top:4px">The employment-cost value of those hours, per year.</p></div>
-<div class="valueblock"><span class="eyebrow">Cash savings</span><strong>${!c.timeUseAnswered?'Needs input':money(c.cashSavings)}</strong><p class="small muted" style="margin-top:4px">${!c.timeUseAnswered?'Answer the time-use question above.':usesCash(p.timeUse)?'Your Expected-scenario figure, scaled to this scenario.':'Capacity value only, no cash saving entered.'}</p></div>
+<div class="valueblock"><span class="eyebrow">Cash savings</span><strong>${!c.timeUseAnswered?'Needs input':money(c.cashSavings)}</strong><p class="small muted" style="margin-top:4px">${!c.timeUseAnswered?'Answer the time-use question above.':c.cashNotCounted?NOT_PLANNED_NOTE+'.':usesCash(p.timeUse)?'Your Expected-scenario figure, scaled to this scenario.':'Capacity value only, no cash saving entered.'}</p></div>
 <div class="valueblock"><span class="eyebrow">Business impact</span><strong style="font-size:14px">${esc(p.impact)}</strong><p class="small muted" style="margin-top:4px">Expected outcomes, not included in ROI.</p></div>
 </div></div>`;
 }
@@ -529,7 +573,7 @@ function waterfall(p,view){
   const bars=[
     {label:'Annual benefit',value:benefit,kind:'add',
      say:view==='financial'
-      ?`The cash saving for this process in the ${c.scenarioName} scenario: ${money(benefit)} a year${c.expectedRate!==0&&c.rate!==c.expectedRate?`, scaled from the ${money(c.cashEntered)} you entered for Expected`:''}.`
+      ?(c.cashNotCounted?`${NOT_PLANNED_NOTE}, so no cash saving is counted.`:`The ${p.timeUse==='nohire'?'avoided hiring cost':'cash saving'} for this process in the ${c.scenarioName} scenario: ${money(benefit)} a year${c.expectedRate!==0&&c.rate!==c.expectedRate?`, scaled from the ${money(c.cashEntered)} you entered for Expected`:''}.`)
       :`The employment-cost value of the hours released: ${money(benefit)} a year.`},
     {label:'Setup cost',value:-c.setup,kind:'sub',
      say:`Building it costs ${money(c.setup)} once, deducted in year one.`},
@@ -617,7 +661,7 @@ function returnPanel(p,view){
 <div class="card" style="margin-bottom:12px"><span class="eyebrow">${label}</span><div class="metric ${r.state==='ok'&&r.value<0?'negative':r.state==='ok'?'positive':''}">${showRet(r)}</div>
 ${calcToggle('r','Show calculation',`${view==='financial'&&cashLine(c)?cashLine(c)+'<br>':''}<code>(${bname} − running costs − setup) ÷ setup × 100</code><br><code>= (${benefit==null?'—':money(benefit)} − ${money(c.running)} − ${money(c.setup)}) ÷ ${money(c.setup)} × 100</code><br><code>= ${showRet(r)}</code>${c.setup===0?'<br>Setup cost is zero, so a percentage return cannot be expressed.':''}`)}</div>
 <div class="card"><span class="eyebrow">Payback</span><div class="metric">${showPay(pb)}</div>
-<p class="small muted">${PAYBACK_NOTE}. <span class="pill prov">Provisional</span></p>
+<p class="small muted">${paybackNote(p.sprints*SPRINT_WEEKS)} <span class="pill prov">Provisional</span></p>
 ${calcToggle('p','Show calculation',`${view==='financial'&&cashLine(c)?cashLine(c)+'<br>':''}<code>setup ÷ ((${bname} − running costs) ÷ 12)</code><br><code>= ${money(c.setup)} ÷ ((${benefit==null?'—':money(benefit)} − ${money(c.running)}) ÷ 12)</code><br><code>= ${showPay(pb)}</code>${pb.state==='notreached'?'<br>The benefit does not exceed the running costs, so the setup cost is never repaid.':''}${pb.state==='ok'&&pb.value===0?'<br>Setup cost is zero and the benefit exceeds running costs, so payback is immediate.':''}`)}</div></div>`;
 }
 /* ---------- step 8: results ------------------------------------ */
@@ -643,12 +687,10 @@ function totals(sc=scenario){
 /* Portfolio financial ROI from the totals above: (benefit − running − setup) ÷ setup × 100, as in roi(). */
 const portfolioFinROI=t=>t.cashCount&&t.cashSetup?(t.cash-t.cashRunning-t.cashSetup)/t.cashSetup*100:null;
 
-/* Sort order kept as before: by capacity-based return, descending. */
+/* Sorted by provisional priority score, descending; "Needs input" last. */
 function rankedProcesses(){
-  return [...chosen()].sort((a,b)=>{
-    const ra=roi(a).capacityReturn,rb=roi(b).capacityReturn;
-    return (rb.state==='ok'?rb.value:-Infinity)-(ra.state==='ok'?ra.value:-Infinity)
-  })
+  const sc=p=>priority(p).score;
+  return [...chosen()].sort((a,b)=>(sc(b)==null?-Infinity:sc(b))-(sc(a)==null?-Infinity:sc(a)))
 }
 
 function portfolioCards(){
@@ -682,18 +724,39 @@ function portfolioTable(){
   const maxSetup=Math.max(1,...list.map(p=>roi(p).setup));
   const maxPay=Math.max(1,...list.map(p=>{const q=roi(p).capacityPayback;return q.state==='ok'?q.value:0}));
   const bar=(v,max,neg)=>`<div class="inbar"><i class="${neg?'neg':''}" style="width:${Math.min(100,Math.abs(v)/max*100).toFixed(1)}%"></i></div>`;
-  return `<div class="tablewrap"><table><thead><tr><th>Process</th><th>Capacity value</th><th>Cash savings</th><th>Investment</th><th>Payback</th><th>Capacity-based return</th></tr></thead><tbody>${list.map(p=>{
-    const c=roi(p),sel=p.id===resultProcess;
+  return `<div class="tablewrap"><table><thead><tr><th>Process</th><th>Priority</th><th>Capacity value</th><th>Cash savings</th><th>Investment</th><th>Payback</th><th>Capacity-based return</th></tr></thead><tbody>${list.map((p,ix)=>{
+    const c=roi(p),sel=p.id===resultProcess,pr=priority(p);
     return `<tr class="selrow ${sel?'sel':''}" tabindex="0" role="button" aria-pressed="${sel}" aria-label="Select ${esc(p.name)}" onclick="selectResult(${p.id})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectResult(${p.id})}">
 <td style="white-space:normal;min-width:210px"><strong>${esc(p.name)}</strong><div class="muted">${esc(p.impact)}</div>${p.id===3?'<span class="pill amber" style="margin-top:6px">Stock release excluded</span>':''}</td>
+<td>${pr.score==null?`<span class="muted">Needs input</span><div class="muted">${pr.needsInput.join(', ')}</div>`:`<strong>#${ix+1} · ${pr.score.toFixed(1)}</strong>${bar(pr.score,100)}`}${pr.components[0].assumedZero?'<div class="muted">No cash saving: financial return counts as 0</div>':''}</td>
 <td><strong>${money(c.capacityValue)}</strong>${bar(c.capacityValue||0,maxCap)}<div class="muted">${c.hoursSaved==null?'—':num(c.hoursSaved,1)+' h/wk'}</div></td>
 <td>${!c.timeUseAnswered?'<span class="muted">Needs input</span>':money(c.cashSavings)}${c.cashSavings?bar(c.cashSavings,maxCash):''}</td>
 <td>${money(c.setup)}${bar(c.setup,maxSetup)}<div class="muted">${money(c.running)} a year running</div></td>
 <td>${showPay(c.capacityPayback)}${c.capacityPayback.state==='ok'?bar(c.capacityPayback.value,maxPay):''}<div class="muted">capacity basis</div></td>
 <td><strong class="${c.capacityReturn.state==='ok'&&c.capacityReturn.value<0?'negative':c.capacityReturn.state==='ok'?'positive':''}">${showRet(c.capacityReturn)}</strong><div class="muted">financial ${showRet(c.financialROI)}</div></td>
-</tr>`}).join('')}</tbody></table></div><p class="small muted" style="margin-top:10px">${PAYBACK_NOTE}.</p>`;
+</tr>`}).join('')}</tbody></table></div><p class="small muted" style="margin-top:10px">${PAYBACK_NOTE}. Build time by process: ${list.map(p=>`${esc(p.name)} about ${p.sprints*SPRINT_WEEKS} weeks`).join(' · ')}.</p>`;
 }
 function selectResult(id){resultProcess=id;render()}
+
+/* Provisional priority score: weights panel and per-process calculation. */
+function setWeight(i,v){priorityWeights[i]=v===''?0:Math.max(0,+v||0);render()}
+function resetWeights(){priorityWeights=PRIORITY_DEFAULT.slice();render()}
+const PRIORITY_HELP=['Scaled financial year-one ROI. Counts as 0 if no cash saving is entered.','Scaled capacity-based return.','Rank weights of linked goals ÷ rank weights of all goals.','(Value of automating − 1) ÷ 4.','(5 − current satisfaction) ÷ 4.'];
+function weightsPanel(){
+  const pr=priority(chosen()[0]||processes[0]);
+  return `<section class="card"><details style="border-top:0;padding-top:0" ${weightsOpen?'open':''} ontoggle="weightsOpen=this.open"><summary><span style="font-size:15px">Priority score weights (provisional)</span></summary>
+<p class="small muted" style="margin:12px 0">Alex asked for a mix that counts support for strategic objectives; the weights are not set yet.</p>
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr))">${PRIORITY_LABELS.map((l,i)=>`<div><label for="pw${i}" style="font-weight:600">${l}</label><input id="pw${i}" class="numinput" type="number" min="0" step="1" value="${priorityWeights[i]}" onchange="setWeight(${i},this.value)"><div class="small muted" style="margin-top:4px">${PRIORITY_HELP[i]}</div></div>`).join('')}</div>
+<div class="row between" style="margin-top:14px"><span class="small muted">Used as (normalised to 100%): ${pr.components.map(k=>`${num(k.weight*100,1)}%`).join(' / ')}</span><button class="small" onclick="resetWeights()">Reset</button></div></details></section>`;
+}
+function priorityCalc(p){
+  const pr=priority(p);
+  const rawText=k=>k.key==='fin'?(k.raw==null?'no cash saving entered, counts as 0':pct(k.raw))
+    :k.key==='cap'?(k.raw==null?'Needs input':pct(k.raw))
+    :k.key==='goals'?`${k.goalGot} ÷ ${k.goalTotal} rank weights = ${num(k.raw,1)}%`
+    :(k.raw==null?'Needs input':`${k.raw} of 5`);
+  return `<div style="margin-bottom:6px"><code>scale(r) = clamp((r + 100) ÷ 400 × 100, 0, 100)</code> · ${pr.scenarioName} scenario</div>${pr.components.map((k,i)=>`<div style="margin-bottom:6px"><strong>${i+1}. ${k.label}</strong><br>Raw: ${rawText(k)} · scaled: ${k.scaled==null?'Needs input':num(k.scaled,1)} · weight: ${num(k.weight*100,1)}% · contribution: ${k.contribution==null?'—':num(k.contribution,2)}</div>`).join('')}<div><code>score = sum of contributions = ${pr.score==null?'Needs input ('+pr.needsInput.join(', ')+')':num(pr.score,2)}</code></div>`;
+}
 
 /* Editing the selected process without leaving the Results step. */
 function selectedPanel(){
@@ -708,6 +771,7 @@ function selectedPanel(){
 <div class="seg" role="radiogroup" aria-label="Waterfall view">${[['financial','Financial'],['capacity','Capacity-based']].map(([k,l])=>`<button role="radio" aria-checked="${view===k}" class="${view===k?'active':''}" onclick="wfView='${k}';render()">${l}</button>`).join('')}</div></div>
 ${needsFinancial&&wfView==='financial'?`<div class="info amber"><strong>Showing the capacity-based view.</strong> The financial view needs an answer to the time-use question below.${timeUseControl(p,ns+'inline')}</div>`:''}
 <div class="wfwrap" style="margin-top:16px">${waterfall(p,view)}${returnPanel(p,view)}</div>
+<div class="info" style="margin-top:20px;background:#f6f8f7;border-color:#e1e8e4"><strong>Priority score</strong> <span class="pill prov">Provisional</span><div class="metric" style="font-size:24px">${priority(p).score==null?'Needs input':priority(p).score.toFixed(1)}</div>${calcToggle('prio','Show calculation',priorityCalc(p))}</div>
 <div class="info" style="margin-top:20px"><strong>What changes between scenarios</strong><p style="margin-top:6px">The time-reduction percentage varies: ${SCENARIOS.map((s,i)=>`${s} ${p.rates[i]}%`).join(' / ')}. ${c.cashEntered?`The cash saving moves with it (the figure you entered is the Expected scenario, scaled by scenario ÷ Expected time reduction): ${SCENARIOS.map((s,i)=>`${s} ${money(roi(p,i).cashSavings)}`).join(' / ')}${c.expectedRate===0?'. The Expected reduction is 0%, so it is held constant':''}. `:''}Everything else — people, time spent, setup cost and running costs — is held constant across all three. <span class="pill prov">Provisional</span></p></div>
 <h3 style="margin-top:22px">Edit this process</h3><p class="small muted" style="margin-bottom:14px">Changes update the table, the chart and the totals straight away.</p>
 <div class="grid two" style="align-items:start"><div>
@@ -720,10 +784,14 @@ function setRateDirect(id,j,input){setRate(id,j,input)}
 
 function assumptionsPanel(){
   const A=[
-    `A ${STANDARD_WEEK}-hour standard week is used to convert hours into a share of someone’s time.`,
+    `A ${STANDARD_WEEK}-hour standard week is used (confirmed by Alex) to convert hours into a share of someone’s time.`,
     'Payback starts when the tool is in use. Build time is not included. Payback reads “Immediate” when setup cost is zero and the benefit exceeds running costs.',
     'Provisional: the cash saving you enter is the Expected-scenario figure. Other scenarios use cash saving × (scenario time reduction ÷ Expected time reduction), held constant if the Expected reduction is 0%.',
     'Portfolio financial ROI leaves out any process with no setup cost.',
+    'The point at which the payback clock starts is not confirmed. <span class="pill prov">Provisional</span>',
+    'Cash rules are a recommendation awaiting Alex’s OK: reducing overtime counts as cash saving; avoiding a planned or budgeted hire counts as avoided cost; handling more work and redeploying staff do not. <span class="pill prov">Provisional</span>',
+    'Priority score weights are equal (20% each) and not set. <span class="pill prov">Provisional</span>',
+    'The 30-day retention period and the emailed link are tentative. <span class="pill prov">Provisional</span>',
     'One-year view only. Nothing beyond year one is modelled.',
     'One time-use choice per process. Saved time is not split across several uses.',
     'Running costs are illustrative placeholders, not quotes.',
@@ -739,7 +807,8 @@ function results(){
   return heading('Your opportunities, made clear','See where the value comes from, and what it costs to get it.')+`<div class="row between" style="margin-bottom:22px"><span class="small muted">${list.length} processes evaluated · USD</span><div class="row"><span class="small muted" id="scenlabel">Scenario</span><div class="seg" role="radiogroup" aria-labelledby="scenlabel">${SCENARIOS.map((s,i)=>`<button role="radio" aria-checked="${scenario===i}" aria-label="${s} scenario" class="${scenario===i?'active':''}" onclick="scenario=${i};render()">${s}</button>`).join('')}</div></div></div>`
   +portfolioCards()
   +selectedPanel()
-  +`<section class="card"><div class="row between"><div><h2>Compare your opportunities</h2><p class="small muted">Sorted by capacity-based return · select a row to see its waterfall · a strategic priority score is not yet defined</p></div><button class="small" onclick="go(6)">Edit assumptions</button></div>${portfolioTable()}</section>`
+  +`<section class="card"><div class="row between"><div><h2>Compare your opportunities</h2><p class="small muted">Sorted by priority score · select a row to see its waterfall · Priority score is provisional: ${priorityWeights.every(w=>w===priorityWeights[0])?'equal weights':'custom weights'}</p></div><button class="small" onclick="go(6)">Edit assumptions</button></div>${portfolioTable()}</section>`
+  +weightsPanel()
   +assumptionsPanel()
   +`<div class="grid two"><section class="card"><span class="pill">LOOK BEYOND ROI</span><h2 style="margin-top:15px">Goal impact matters, too.</h2><p class="muted small">Late-delivery tracking has a negative capacity-based return in the example, but supports customer satisfaction and on-time delivery. The four kinds of value are deliberately kept apart so you can weigh them yourself.</p></section><section class="card"><h2>What’s behind these numbers?</h2><details open><summary>Estimate boundaries</summary><p>Capacity value is the employment cost of released hours, not guaranteed cash. Cash savings are only what you entered, scaled by scenario (provisional). Stock release, revenue effects and unconfirmed benchmarks are excluded. Scenario ranges are illustrative.</p></details></section></div>`;
 }
@@ -755,7 +824,7 @@ function report(){
   +`<div class="grid two"><section class="card"><div class="row between"><h2>Value vs. effort</h2><span class="pill prov">Provisional</span></div><p class="small muted">Annual capacity value against build effort · dots show each process’s first linked goal</p><div class="chart"><span class="small muted" style="position:absolute;top:-5px;left:-45px">${Math.round(max/1000)}k</span><span class="small muted" style="position:absolute;bottom:-5px;left:-35px">$0</span>${list.map((p,i)=>`<span class="dot" style="left:${p.sprints/(Math.max(...list.map(p=>p.sprints),1)+1)*100}%;bottom:${(roi(p).capacityValue||0)/max*85}%" title="${esc(p.name)}: ${money(roi(p).capacityValue)}, ${p.sprints} sprints">${goalTag(p)}</span>`).join('')}<span class="small muted" style="position:absolute;bottom:-30px;left:0">0</span><span class="small muted" style="position:absolute;bottom:-30px;right:0">${Math.max(...list.map(p=>p.sprints),1)+1} sprints →</span></div><div class="legendgoal" aria-label="Goal legend">${goals.map((g,i)=>`<span class="small"><strong>G${i+1}</strong> · ${esc(g.name)}</span>`).join('')}${list.some(p=>!p.links.length)?'<span class="small"><strong>–</strong> · No linked goal</span>':''}</div>${list.map(p=>`<p class="small muted" style="margin-top:7px"><strong>${goalTag(p)}</strong> · ${esc(p.name)} · ${money(roi(p).capacityValue)}, ${p.sprints} ${p.sprints===1?"sprint":"sprints"}</p>`).join('')}</section>
 <section class="card"><h2>Your North Star goals</h2><p class="small muted">Business targets · not predicted outcomes</p>${goals.map((g,i)=>`<div class="process"><span class="eyebrow">PRIORITY ${i+1}</span><h3 style="margin:7px 0 12px">${esc(g.name)}</h3><div class="row between"><span class="muted">${esc(g.current)||'To confirm'}</span><strong class="positive">→ ${esc(g.target)||'To confirm'}</strong></div><div class="small muted" style="margin-top:10px">${list.filter(p=>p.links.includes(i)).length} linked processes</div></div>`).join('')}</section></div>
 <section class="card"><h2>Financial overview · ${SCENARIOS[scenario]} scenario</h2>${portfolioTable()}
-<details><summary>Calculation & assumptions</summary><p>Loaded cost = salary × 1.25, unless overridden. Time spent is entered as hours per person per week, or as tasks per week × minutes per task. Current cost = people × loaded cost × (hours per person ÷ ${STANDARD_WEEK}). Capacity value = current cost × time reduction. Setup cost defaults to sprints × ${money(SPRINT_COST)} and is editable. Running costs are the sum of software, AI usage and support, and are placeholders.</p><p><strong>Financial year-one ROI</strong> = (cash savings − annual running costs − setup cost) ÷ setup cost × 100. Cash savings are only those entered against “Reduce overtime” or “Avoid hiring”. The figure entered is the Expected-scenario saving; other scenarios use cash saving × (scenario time reduction ÷ Expected time reduction), held constant if the Expected reduction is 0% (provisional). The portfolio percentage leaves out any process with no setup cost.</p><p><strong>Capacity-based return</strong> = (capacity value − annual running costs − setup cost) ÷ setup cost × 100. This is never called ROI, because released time is not cash.</p><p><strong>Payback in months</strong> = setup cost ÷ ((benefit − running costs) ÷ 12), and shows “Not reached” where the benefit does not exceed the running costs, or “Immediate” where setup cost is zero and the benefit exceeds running costs. ${PAYBACK_NOTE} (provisional). No strategic priority score is assigned.</p></details></section>
+<details><summary>Calculation & assumptions</summary><p>Loaded cost = salary × 1.25, unless overridden. Time spent is entered as hours per person per week, or as tasks per week × minutes per task. Current cost = people × loaded cost × (hours per person ÷ ${STANDARD_WEEK}). Capacity value = current cost × time reduction. Setup cost defaults to sprints × ${money(SPRINT_COST)} and is editable. Running costs are the sum of software, AI usage and support, and are placeholders.</p><p><strong>Financial year-one ROI</strong> = (cash savings − annual running costs − setup cost) ÷ setup cost × 100. Cash savings are only those entered against “Reduce overtime” or “Avoid hiring”. The figure entered is the Expected-scenario saving; other scenarios use cash saving × (scenario time reduction ÷ Expected time reduction), held constant if the Expected reduction is 0% (provisional). The portfolio percentage leaves out any process with no setup cost.</p><p><strong>Capacity-based return</strong> = (capacity value − annual running costs − setup cost) ÷ setup cost × 100. This is never called ROI, because released time is not cash.</p><p><strong>Payback in months</strong> = setup cost ÷ ((benefit − running costs) ÷ 12), and shows “Not reached” where the benefit does not exceed the running costs, or “Immediate” where setup cost is zero and the benefit exceeds running costs. ${PAYBACK_NOTE} (provisional). Priority score (provisional) is the weighted average of five components, each scaled 0 to 100: financial return, capacity-based return, goal support, perceived value and satisfaction gap. Weights default to 20% each.</p></details></section>
 <footer><button onclick="go(7)">← Back to results</button><div class="row"><button disabled title="Sharing will be available in the actual tool">Share link</button><button disabled title="PDF export will be available in the actual tool">Download PDF</button></div></footer>
 <p class="small muted" style="text-align:right;margin-top:10px">Sharing and PDF export are unavailable in this mockup.</p>`;
 }
@@ -812,6 +881,15 @@ function selfCheck(){
   }
   if(os)scen('Order-status queries · Optimistic financial ROI',val(roi(os,2).financialROI),76.2);
   [[0,-37.0],[1,4.0],[2,45.0]].forEach(([sc,want])=>scen(`Portfolio · ${SCENARIOS[sc]} financial ROI`,portfolioFinROI(totals(sc)),want));
+  /* Priority score (provisional, Expected scenario, default weights) */
+  const wantPrio=[['Order entry from email',75.67],['Order-status queries',55.30],['Late-delivery tracking',51.25],['Weekly management reporting',39.00],['Reorder planning',25.95]];
+  const savedW=priorityWeights.slice();priorityWeights=PRIORITY_DEFAULT.slice();
+  wantPrio.forEach(([n,want])=>{const p=processes.find(x=>x.name===n);if(!p)return problems.push(`${n}: process not found`);scen(`${n} · priority score`,priority(p,1).score,want)});
+  const order=[...processes].sort((a,b)=>priority(b,1).score-priority(a,1).score).map(p=>p.name);
+  if(order.join('|')!==wantPrio.map(x=>x[0]).join('|'))problems.push(`Priority order: expected ${wantPrio.map(x=>x[0]).join(' > ')}, got ${order.join(' > ')}`);
+  priorityWeights=savedW;
+  /* Order-status with the planned-hire box unticked */
+  if(os){os.hirePlanned=false;scen('Order-status queries · hire not planned · financial ROI',val(roi(os,1).financialROI),-130.0);os.hirePlanned=true}
   if(problems.length){
     console.error('[Audit mockup self-check] %d mismatch(es) against the agreed figures:',problems.length);
     problems.forEach(p=>console.error('  • '+p));
